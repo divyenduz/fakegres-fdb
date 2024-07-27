@@ -25,10 +25,13 @@ Basically, this is 0.00001 version of SQL over KV, the idea is not new at all. C
 
 I wanted to learn data modeling with Foundation DB and this was one my [didn't get to it projects at Recurse](https://blog.divyendusingh.com/p/recurse-center-return-statement).
 
+The code is heavily commented to show my intent, needless to say this is very WIP.
+
 ## Resources
 
-- [Data modeling](https://apple.github.io/foundationdb/data-modeling.html)
+- [Data modeling in Foundation DB](https://apple.github.io/foundationdb/data-modeling.html)
 - [The architecture of a distributed SQL database, part 1: Converting SQL to a KV store](https://www.cockroachlabs.com/blog/distributed-sql-key-value-store/)
+- [CockroachDB: Architecture of a Geo-Distributed SQL Database](https://youtu.be/OJySfiMKXLs?t=1104)
 - [CockroachDB's v3 encoding](https://github.com/cockroachdb/cockroach/blob/master/pkg/util/encoding/encoding.go)
 - [CockroachDB's v2 encoding](https://www.cockroachlabs.com/blog/sql-cockroachdb-column-families/)
 - [CockroachDB's v1 encoding](https://www.cockroachlabs.com/blog/sql-in-cockroachdb-mapping-table-data-to-key-value-storage/)
