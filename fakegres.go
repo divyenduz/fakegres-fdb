@@ -20,5 +20,5 @@ func main() {
 		})
 	}
 
-	runPgServer(cfg.pgPort, db)
+	runPgServer(cfg.pgPort, db, cfg)
 }

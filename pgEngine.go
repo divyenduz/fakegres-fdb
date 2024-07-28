@@ -237,7 +237,12 @@ func (pe pgEngine) executeInsert(stmt *pgquery.InsertStmt) error {
 			for _, value := range values.GetList().Items {
 				if c := value.GetAConst(); c != nil {
 					if s := c.Val.GetString_(); s != nil {
-						tr.Set(tableDataSS.Pack(tuple.Tuple{tblName, tbl.ColumnNames[columnIndex], id}), []byte(s.Str))
+						// Columnar data
+						tr.Set(tableDataSS.Pack(tuple.Tuple{tblName, "c", tbl.ColumnNames[columnIndex], id}), []byte(s.Str))
+						log.Printf("Inserted key c: %s", tableDataSS.Pack(tuple.Tuple{tblName, "c", tbl.ColumnNames[columnIndex], id}))
+						// Row based data
+						tr.Set(tableDataSS.Pack(tuple.Tuple{tblName, "r", id, tbl.ColumnNames[columnIndex]}), []byte(s.Str))
+						log.Printf("Inserted key r: %s", tableDataSS.Pack(tuple.Tuple{tblName, "r", id, tbl.ColumnNames[columnIndex]}))
 
 						if columnIndex < maxColumnIndex {
 							columnIndex += 1
@@ -248,7 +253,12 @@ func (pe pgEngine) executeInsert(stmt *pgquery.InsertStmt) error {
 					if i := c.Val.GetInteger(); i != nil {
 						// TODO: better convert in to byte[], with this conversion, it ends up being a string
 						valueJson, _ := json.Marshal(i.Ival)
-						tr.Set(tableDataSS.Pack(tuple.Tuple{tblName, tbl.ColumnNames[columnIndex], id}), valueJson)
+						// Columnar data
+						tr.Set(tableDataSS.Pack(tuple.Tuple{tblName, "c", tbl.ColumnNames[columnIndex], id}), valueJson)
+						log.Printf("Inserted key c: %s", tableDataSS.Pack(tuple.Tuple{tblName, "c", tbl.ColumnNames[columnIndex], id}))
+						// Row based data
+						tr.Set(tableDataSS.Pack(tuple.Tuple{tblName, "r", id, tbl.ColumnNames[columnIndex]}), valueJson)
+						log.Printf("Inserted key r: %s", tableDataSS.Pack(tuple.Tuple{tblName, "r", id, tbl.ColumnNames[columnIndex]}))
 
 						if columnIndex < maxColumnIndex {
 							columnIndex += 1
@@ -344,6 +354,91 @@ data/table_data/user/name/34e7ff77-1bed-4ebd-be56-4b966e67c595: ted
 The Select code collects them into [[14, garry], [20, ted]] and returns the result accordingly.
 */
 
+func (pe pgEngine) executeSelectColumnar(stmt *pgquery.SelectStmt) (*pgResult, error) {
+	tblName := stmt.FromClause[0].GetRangeVar().Relname
+	tbl, err := pe.getTableDefinition(tblName)
+	if err != nil {
+		return nil, err
+	}
+
+	results := &pgResult{}
+	for _, c := range stmt.TargetList {
+		fieldName := c.GetResTarget().Val.GetColumnRef().Fields[0].GetString_().Str
+		results.fieldNames = append(results.fieldNames, fieldName)
+
+		fieldType := ""
+		for i, cn := range tbl.ColumnNames {
+			if cn == fieldName {
+				fieldType = tbl.ColumnTypes[i]
+			}
+		}
+
+		if fieldType == "" {
+			return nil, fmt.Errorf("unknown field: %s", fieldName)
+		}
+
+		results.fieldTypes = append(results.fieldTypes, fieldType)
+	}
+
+	dataDir, err := directory.CreateOrOpen(pe.db, []string{"data"}, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	tableDataSS := dataDir.Sub("table_data")
+
+	_, _ = pe.db.Transact(func(tr fdb.Transaction) (interface{}, error) {
+		query := tableDataSS.Pack(tuple.Tuple{tbl.Name, "c"})
+		rangeQuery, _ := fdb.PrefixRange(query)
+		ri := tr.GetRange(rangeQuery, fdb.RangeOptions{
+			Mode: fdb.StreamingModeWantAll,
+		}).Iterator()
+
+		var columnOrder []string
+		var targetRows [][]any
+		targetRows = append(targetRows, []any{})
+		rowIndex := -1
+		lastColumn := ""
+		for ri.Advance() {
+			kv := ri.MustGet()
+			t, _ := tableDataSS.Unpack(kv.Key)
+
+			currentTableName := t[0].(string)
+			currentColumnFormat := t[1].(string)
+			currentColumnName := t[2].(string)
+			currentInternalRowId := t[3].(string)
+			log.Println("fetching row metadata: ", currentTableName, currentColumnFormat, currentColumnName, currentInternalRowId)
+			if currentColumnName != lastColumn {
+				rowIndex = 0
+				lastColumn = currentColumnName
+				columnOrder = append(columnOrder, currentColumnName)
+			} else {
+				targetRows = append(targetRows, []any{})
+			}
+
+			for _, target := range results.fieldNames {
+				if target == currentColumnName {
+					targetRows[rowIndex] = append(targetRows[rowIndex], string(kv.Value))
+				}
+			}
+			rowIndex += 1
+		}
+		results.fieldNames = columnOrder
+
+		// TODO: don't add empty arrays in the first place
+		var targetRowsFinal [][]any
+		targetRows = append(targetRows, []any{})
+		for _, row := range targetRows {
+			if len(row) > 0 {
+				targetRowsFinal = append(targetRowsFinal, row)
+			}
+		}
+		results.rows = targetRowsFinal
+		return results, nil
+	})
+
+	return results, nil
+}
+
 func (pe pgEngine) executeSelect(stmt *pgquery.SelectStmt) (*pgResult, error) {
 	tblName := stmt.FromClause[0].GetRangeVar().Relname
 	tbl, err := pe.getTableDefinition(tblName)
@@ -377,37 +472,35 @@ func (pe pgEngine) executeSelect(stmt *pgquery.SelectStmt) (*pgResult, error) {
 	tableDataSS := dataDir.Sub("table_data")
 
 	_, _ = pe.db.Transact(func(tr fdb.Transaction) (interface{}, error) {
-		ri := tr.GetRange(tableDataSS.Sub((tbl.Name)), fdb.RangeOptions{
+		query := tableDataSS.Pack(tuple.Tuple{tbl.Name, "r"})
+		rangeQuery, _ := fdb.PrefixRange(query)
+		ri := tr.GetRange(rangeQuery, fdb.RangeOptions{
 			Mode: fdb.StreamingModeWantAll,
 		}).Iterator()
 
-		var columnOrder []string
 		var targetRows [][]any
 		targetRows = append(targetRows, []any{})
-		rowIndex := -1
-		lastColumn := ""
+		rowIndex := 0
+		columnOrder := []string{}
 		for ri.Advance() {
 			kv := ri.MustGet()
 			t, _ := tableDataSS.Unpack(kv.Key)
 
 			currentTableName := t[0].(string)
-			currentColumnName := t[1].(string)
+			currentColumnFormat := t[1].(string)
 			currentInternalRowId := t[2].(string)
-			log.Println("fetching row metadata: ", currentTableName, currentColumnName, currentInternalRowId)
-			if currentColumnName != lastColumn {
-				rowIndex = 0
-				lastColumn = currentColumnName
+			currentColumnName := t[3].(string)
+			log.Println("fetching row metadata: ", currentTableName, currentColumnFormat, currentColumnName, currentInternalRowId)
+
+			if len(columnOrder) < len(results.fieldNames) {
 				columnOrder = append(columnOrder, currentColumnName)
-			} else {
+			}
+			if len(targetRows[rowIndex]) == len(results.fieldNames) {
+				rowIndex += 1
 				targetRows = append(targetRows, []any{})
 			}
 
-			for _, target := range results.fieldNames {
-				if target == currentColumnName {
-					targetRows[rowIndex] = append(targetRows[rowIndex], string(kv.Value))
-				}
-			}
-			rowIndex += 1
+			targetRows[rowIndex] = append(targetRows[rowIndex], string(kv.Value))
 		}
 		results.fieldNames = columnOrder
 

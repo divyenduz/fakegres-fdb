@@ -21,6 +21,7 @@ var dataTypeOIDMap = map[string]uint32{
 type pgServer struct {
 	conn net.Conn
 	db   fdb.Transactor
+	cfg  config
 }
 
 func (pgs pgServer) done(buf []byte, msg string) {
@@ -28,7 +29,7 @@ func (pgs pgServer) done(buf []byte, msg string) {
 	buf = (&pgproto3.ReadyForQuery{TxStatus: 'I'}).Encode(buf)
 	_, err := pgs.conn.Write(buf)
 	if err != nil {
-		log.Printf("Failed to write query response: %s", err)
+		log.Printf("failed to write query response: %s", err)
 	}
 }
 
@@ -62,7 +63,7 @@ func (pgs pgServer) writePgResult(res *pgResult) {
 func (pgs pgServer) handleStartupMessage(pgconn *pgproto3.Backend) error {
 	startupMessage, err := pgconn.ReceiveStartupMessage()
 	if err != nil {
-		return fmt.Errorf("Error receiving startup message: %s", err)
+		return fmt.Errorf("error receiving startup message: %s", err)
 	}
 
 	switch startupMessage.(type) {
@@ -71,46 +72,54 @@ func (pgs pgServer) handleStartupMessage(pgconn *pgproto3.Backend) error {
 		buf = (&pgproto3.ReadyForQuery{TxStatus: 'I'}).Encode(buf)
 		_, err = pgs.conn.Write(buf)
 		if err != nil {
-			return fmt.Errorf("Error sending ready for query: %s", err)
+			return fmt.Errorf("error sending ready for query: %s", err)
 		}
 
 		return nil
 	case *pgproto3.SSLRequest:
 		_, err = pgs.conn.Write([]byte("N"))
 		if err != nil {
-			return fmt.Errorf("Error sending deny SSL request: %s", err)
+			return fmt.Errorf("error sending deny SSL request: %s", err)
 		}
 
 		return pgs.handleStartupMessage(pgconn)
 	default:
-		return fmt.Errorf("Unknown startup message: %#v", startupMessage)
+		return fmt.Errorf("unknown startup message: %#v", startupMessage)
 	}
 }
 
 func (pgs pgServer) handleMessage(pgc *pgproto3.Backend) error {
-	msg, err := pgc.Receive()
-	if err != nil {
-		return fmt.Errorf("Error receiving message: %s", err)
+	msg, receive_err := pgc.Receive()
+	if receive_err != nil {
+		return fmt.Errorf("error receiving message: %s", receive_err)
 	}
 
 	switch t := msg.(type) {
 	case *pgproto3.Query:
-		stmts, err := pgquery.Parse(t.String)
-		if err != nil {
-			return fmt.Errorf("Error parsing query: %s", err)
+		stmts, parse_err := pgquery.Parse(t.String)
+		if parse_err != nil {
+			return fmt.Errorf("error parsing query: %s", receive_err)
 		}
 
 		if len(stmts.GetStmts()) > 1 {
-			return fmt.Errorf("Only make one request at a time.")
+			return fmt.Errorf("only make one request at a time")
 		}
 
 		stmt := stmts.GetStmts()[0]
 
 		// Handle SELECTs here
 		s := stmt.GetStmt().GetSelectStmt()
+		var res *pgResult
+		var err error
 		if s != nil {
 			pe := newPgEngine(pgs.db)
-			res, err := pe.executeSelect(s)
+			if pgs.cfg.columnar {
+				res, err = pe.executeSelectColumnar(s)
+
+			} else {
+				res, err = pe.executeSelect(s)
+			}
+
 			if err != nil {
 				return err
 			}
@@ -126,7 +135,7 @@ func (pgs pgServer) handleMessage(pgc *pgproto3.Backend) error {
 	case *pgproto3.Terminate:
 		return nil
 	default:
-		return fmt.Errorf("Received message other than Query from client: %s", msg)
+		return fmt.Errorf("received message other than Query from client: %s", msg)
 	}
 
 	return nil
@@ -151,7 +160,7 @@ func (pgs pgServer) handle() {
 	}
 }
 
-func runPgServer(port string, db fdb.Transactor) {
+func runPgServer(port string, db fdb.Transactor, cfg config) {
 	ln, err := net.Listen("tcp", "localhost:"+port)
 	if err != nil {
 		log.Fatal(err)
@@ -163,7 +172,7 @@ func runPgServer(port string, db fdb.Transactor) {
 			log.Fatal(err)
 		}
 
-		pc := pgServer{conn, db}
+		pc := pgServer{conn, db, cfg}
 		go pc.handle()
 	}
 }
