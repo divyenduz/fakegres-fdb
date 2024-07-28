@@ -9,7 +9,7 @@ Setup FoundationDB (https://apple.github.io/foundationdb/) on your machine.
 ```bash
 $ go mod tidy
 $ go build
-$ ./fakegres-fdb
+$ ./fakegres-fdb -pg-port=6000 -reset=true
 $ psql -h localhost -p 6000
 
 psql> create table customer (age int, name text);
